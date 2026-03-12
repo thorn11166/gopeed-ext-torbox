@@ -3,6 +3,7 @@
   "title": "TorBox Debrid",
   "author": "thorn11166",
   "description": "Route magnet links through TorBox. Magnets are cached in the cloud and downloaded as fast direct HTTP.",
+  "icon": "icon.png",
   "version": "1.0.0",
   "scripts": [
     {
