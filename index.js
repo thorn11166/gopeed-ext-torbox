@@ -14,29 +14,41 @@ gopeed.events.onResolve(async function (ctx) {
   const magnet = ctx.req.url;
   gopeed.logger.info('TorBox: submitting magnet…');
 
+  // 0. Quick cache check — if the hash is already in TorBox's global cache
+  //    we can skip the long poll delay after createTorrent.
+  const hash = extractInfoHash(magnet);
+  var alreadyCached = false;
+  if (hash) {
+    alreadyCached = await checkCached(apiKey, hash);
+    if (alreadyCached) {
+      gopeed.logger.info('TorBox: hash already cached globally, should be instant');
+    }
+  }
+
   // 1. Add magnet to TorBox (or re-use if already there)
   const torrentId = await createTorrent(apiKey, magnet);
   gopeed.logger.info('TorBox: queued, torrentId=' + torrentId);
 
-  // 2. Poll for up to 90 s — enough for cached/popular torrents to resolve immediately.
-  //    If not ready in time, throw a friendly error so the user can paste it again later.
-  const torrent = await waitUntilCached(apiKey, torrentId, QUICK_POLL_DURATION_MS);
+  // 2. Poll until cached. Skip the initial sleep if we know it's already cached.
+  const torrent = await waitUntilCached(apiKey, torrentId, QUICK_POLL_DURATION_MS, alreadyCached);
   const fileCount = (torrent.files || []).length;
   gopeed.logger.info('TorBox: "' + torrent.name + '" ready (' + fileCount + ' file(s))');
 
-  // 3. Fetch download links and hand them back to Gopeed
+  // 3. Build permanent redirect URLs directly — no extra API calls needed.
+  //    TorBox's requestdl?redirect=true acts as a permalink: Gopeed follows the
+  //    redirect to the CDN link when it actually downloads the file.
   const files = torrent.files || [];
   var resolvedFiles;
 
   if (files.length <= 1) {
     var fileId = files.length === 1 ? files[0].id : null;
-    var url = await requestDL(apiKey, torrentId, fileId);
+    var url = buildRedirectUrl(apiKey, torrentId, fileId);
     resolvedFiles = [{ name: torrent.name, size: torrent.size || 0, req: { url: url } }];
   } else {
     resolvedFiles = [];
     for (var i = 0; i < files.length; i++) {
       var f = files[i];
-      var u = await requestDL(apiKey, torrentId, f.id);
+      var u = buildRedirectUrl(apiKey, torrentId, f.id);
       resolvedFiles.push({ name: f.name, size: f.size || 0, req: { url: u } });
     }
   }
@@ -45,6 +57,40 @@ gopeed.events.onResolve(async function (ctx) {
 });
 
 // ── Helpers ───────────────────────────────────────────────────
+
+function extractInfoHash(magnet) {
+  var match = magnet.match(/[?&]xt=urn:btih:([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})/i);
+  return match ? match[1].toLowerCase() : null;
+}
+
+async function checkCached(apiKey, hash) {
+  try {
+    var resp = await fetch(
+      API + '/torrents/checkcached?hash=' + hash + '&format=list',
+      { headers: { 'Authorization': 'Bearer ' + apiKey } }
+    );
+    var data = await resp.json();
+    if (!data.success) return false;
+    // Returns list of cached hashes — non-empty means it's cached
+    var d = data.data;
+    return Array.isArray(d) ? d.length > 0 : (d && Object.keys(d).length > 0);
+  } catch (e) {
+    gopeed.logger.warn('TorBox: checkcached error (ignored): ' + e.message);
+    return false;
+  }
+}
+
+// Build a permanent redirect URL — TorBox redirects to the CDN link at download time.
+// No API call needed; link stays valid until the token is reset or torrent is deleted.
+function buildRedirectUrl(apiKey, torrentId, fileId) {
+  var url = API + '/torrents/requestdl' +
+    '?token=' + encodeURIComponent(apiKey) +
+    '&torrent_id=' + torrentId +
+    '&zip_link=false' +
+    '&redirect=true';
+  if (fileId != null) url += '&file_id=' + fileId;
+  return url;
+}
 
 async function createTorrent(apiKey, magnet) {
   var fd = new FormData();
@@ -67,10 +113,17 @@ async function createTorrent(apiKey, magnet) {
   return id;
 }
 
-async function waitUntilCached(apiKey, torrentId, timeoutMs) {
+async function waitUntilCached(apiKey, torrentId, timeoutMs, skipInitialSleep) {
   var deadline = Date.now() + timeoutMs;
+  var first = true;
   while (Date.now() < deadline) {
-    await sleep(POLL_INTERVAL_MS);
+    // Skip the initial delay if the torrent was already globally cached
+    if (first && skipInitialSleep) {
+      first = false;
+    } else {
+      first = false;
+      await sleep(POLL_INTERVAL_MS);
+    }
     try {
       var resp = await fetch(
         API + '/torrents/mylist?id=' + torrentId + '&bypass_cache=true',
@@ -93,22 +146,6 @@ async function waitUntilCached(apiKey, torrentId, timeoutMs) {
   throw new Error(
     'TorBox is still caching this torrent. Paste the magnet again in ~1 minute to check if it\'s ready.'
   );
-}
-
-async function requestDL(apiKey, torrentId, fileId) {
-  var query = 'token=' + encodeURIComponent(apiKey) +
-    '&torrent_id=' + torrentId +
-    '&zip_link=false';
-  if (fileId != null) query += '&file_id=' + fileId;
-
-  var resp = await fetch(API + '/torrents/requestdl?' + query, {
-    headers: { 'Authorization': 'Bearer ' + apiKey },
-  });
-  var data = await resp.json();
-  if (!data.success) {
-    throw new Error('TorBox requestdl failed: ' + (data.detail || data.error || JSON.stringify(data)));
-  }
-  return data.data;
 }
 
 function sleep(ms) {
