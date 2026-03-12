@@ -1,0 +1,26 @@
+{
+  "name": "torbox",
+  "title": "TorBox Debrid",
+  "author": "thorn11166",
+  "description": "Route magnet links through TorBox. Magnets are cached in the cloud and downloaded as fast direct HTTP.",
+  "version": "1.0.0",
+  "scripts": [
+    {
+      "event": "onResolve",
+      "match": {
+        "urls": ["magnet://*"]
+      },
+      "entry": "index.js"
+    }
+  ],
+  "settings": [
+    {
+      "name": "apiKey",
+      "title": "TorBox API Key",
+      "description": "Your API key from torbox.app/dashboard",
+      "required": true,
+      "type": "string",
+      "value": ""
+    }
+  ]
+}
