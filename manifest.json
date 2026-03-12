@@ -21,6 +21,30 @@
       "required": true,
       "type": "string",
       "value": ""
+    },
+    {
+      "name": "zipDownload",
+      "title": "Download as ZIP",
+      "description": "Bundle all files into a single ZIP archive instead of downloading them individually.",
+      "required": false,
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "name": "asQueued",
+      "title": "Add as Queued",
+      "description": "Add the torrent to TorBox without immediately using a download slot. Useful if you are on a limited plan.",
+      "required": false,
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "name": "useRedirect",
+      "title": "Use Permanent URLs",
+      "description": "Build permanent redirect URLs (faster, no extra API call per file). Disable if you experience download failures.",
+      "required": false,
+      "type": "boolean",
+      "value": true
     }
   ]
 }

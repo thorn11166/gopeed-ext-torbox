@@ -11,8 +11,13 @@ gopeed.events.onResolve(async function (ctx) {
     throw new Error('TorBox: API key not set — open Extensions → TorBox Debrid → Settings and enter your key from torbox.app');
   }
 
+  // Read optional toggles (fall back to safe defaults if not set)
+  const zipDownload  = gopeed.settings.zipDownload  === true;
+  const asQueued     = gopeed.settings.asQueued     === true;
+  const useRedirect  = gopeed.settings.useRedirect  !== false; // default true
+
   const magnet = ctx.req.url;
-  gopeed.logger.info('TorBox: submitting magnet…');
+  gopeed.logger.info('TorBox: submitting magnet… (zip=' + zipDownload + ' queued=' + asQueued + ' redirect=' + useRedirect + ')');
 
   // 0. Quick cache check — if the hash is already in TorBox's global cache
   //    we can skip the long poll delay after createTorrent.
@@ -26,7 +31,7 @@ gopeed.events.onResolve(async function (ctx) {
   }
 
   // 1. Add magnet to TorBox (or re-use if already there)
-  const torrentId = await createTorrent(apiKey, magnet);
+  const torrentId = await createTorrent(apiKey, magnet, asQueued);
   gopeed.logger.info('TorBox: queued, torrentId=' + torrentId);
 
   // 2. Poll until cached. Skip the initial sleep if we know it's already cached.
@@ -34,21 +39,24 @@ gopeed.events.onResolve(async function (ctx) {
   const fileCount = (torrent.files || []).length;
   gopeed.logger.info('TorBox: "' + torrent.name + '" ready (' + fileCount + ' file(s))');
 
-  // 3. Build permanent redirect URLs directly — no extra API calls needed.
-  //    TorBox's requestdl?redirect=true acts as a permalink: Gopeed follows the
-  //    redirect to the CDN link when it actually downloads the file.
+  // 3. Resolve download URLs
   const files = torrent.files || [];
   var resolvedFiles;
 
-  if (files.length <= 1) {
-    var fileId = files.length === 1 ? files[0].id : null;
-    var url = buildRedirectUrl(apiKey, torrentId, fileId);
+  if (zipDownload || files.length <= 1) {
+    // Single URL: either a ZIP of everything or the one file
+    var fileId = (!zipDownload && files.length === 1) ? files[0].id : null;
+    var url = useRedirect
+      ? buildRedirectUrl(apiKey, torrentId, fileId, zipDownload)
+      : await requestDL(apiKey, torrentId, fileId, zipDownload);
     resolvedFiles = [{ name: torrent.name, size: torrent.size || 0, req: { url: url } }];
   } else {
     resolvedFiles = [];
     for (var i = 0; i < files.length; i++) {
       var f = files[i];
-      var u = buildRedirectUrl(apiKey, torrentId, f.id);
+      var u = useRedirect
+        ? buildRedirectUrl(apiKey, torrentId, f.id, false)
+        : await requestDL(apiKey, torrentId, f.id, false);
       resolvedFiles.push({ name: f.name, size: f.size || 0, req: { url: u } });
     }
   }
@@ -82,20 +90,37 @@ async function checkCached(apiKey, hash) {
 
 // Build a permanent redirect URL — TorBox redirects to the CDN link at download time.
 // No API call needed; link stays valid until the token is reset or torrent is deleted.
-function buildRedirectUrl(apiKey, torrentId, fileId) {
+function buildRedirectUrl(apiKey, torrentId, fileId, zipLink) {
   var url = API + '/torrents/requestdl' +
     '?token=' + encodeURIComponent(apiKey) +
     '&torrent_id=' + torrentId +
-    '&zip_link=false' +
+    '&zip_link=' + (zipLink ? 'true' : 'false') +
     '&redirect=true';
   if (fileId != null) url += '&file_id=' + fileId;
   return url;
 }
 
-async function createTorrent(apiKey, magnet) {
+async function requestDL(apiKey, torrentId, fileId, zipLink) {
+  var query = 'token=' + encodeURIComponent(apiKey) +
+    '&torrent_id=' + torrentId +
+    '&zip_link=' + (zipLink ? 'true' : 'false');
+  if (fileId != null) query += '&file_id=' + fileId;
+
+  var resp = await fetch(API + '/torrents/requestdl?' + query, {
+    headers: { 'Authorization': 'Bearer ' + apiKey },
+  });
+  var data = await resp.json();
+  if (!data.success) {
+    throw new Error('TorBox requestdl failed: ' + (data.detail || data.error || JSON.stringify(data)));
+  }
+  return data.data;
+}
+
+async function createTorrent(apiKey, magnet, asQueued) {
   var fd = new FormData();
   fd.append('magnet', magnet);
   fd.append('seed', '1');
+  if (asQueued) fd.append('as_queued', 'true');
 
   var resp = await fetch(API + '/torrents/createtorrent', {
     method: 'POST',
