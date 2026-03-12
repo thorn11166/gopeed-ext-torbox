@@ -1,37 +1,43 @@
 const API = 'https://api.torbox.app/v1/api';
 
+// How long to wait for TorBox to cache before giving up and telling the user to retry.
+// TorBox often caches popular torrents within seconds; for others it may take longer.
+const QUICK_POLL_DURATION_MS = 90 * 1000; // 90 seconds
+const POLL_INTERVAL_MS = 5000;
+
 gopeed.events.onResolve(async function (ctx) {
   const apiKey = gopeed.settings.apiKey;
   if (!apiKey) {
-    throw new Error('TorBox: API key not set — open Extensions in Gopeed settings and enter your key from torbox.app');
+    throw new Error('TorBox: API key not set — open Extensions → TorBox Debrid → Settings and enter your key from torbox.app');
   }
 
   const magnet = ctx.req.url;
   gopeed.logger.info('TorBox: submitting magnet…');
 
-  // 1. Add magnet to TorBox
+  // 1. Add magnet to TorBox (or re-use if already there)
   const torrentId = await createTorrent(apiKey, magnet);
   gopeed.logger.info('TorBox: queued, torrentId=' + torrentId);
 
-  // 2. Poll until TorBox has fully cached it
-  const torrent = await waitUntilCached(apiKey, torrentId);
+  // 2. Poll for up to 90 s — enough for cached/popular torrents to resolve immediately.
+  //    If not ready in time, throw a friendly error so the user can paste it again later.
+  const torrent = await waitUntilCached(apiKey, torrentId, QUICK_POLL_DURATION_MS);
   const fileCount = (torrent.files || []).length;
   gopeed.logger.info('TorBox: "' + torrent.name + '" ready (' + fileCount + ' file(s))');
 
   // 3. Fetch download links and hand them back to Gopeed
   const files = torrent.files || [];
-  let resolvedFiles;
+  var resolvedFiles;
 
   if (files.length <= 1) {
-    const fileId = files.length === 1 ? files[0].id : null;
-    const url = await requestDL(apiKey, torrentId, fileId);
+    var fileId = files.length === 1 ? files[0].id : null;
+    var url = await requestDL(apiKey, torrentId, fileId);
     resolvedFiles = [{ name: torrent.name, size: torrent.size || 0, req: { url: url } }];
   } else {
     resolvedFiles = [];
     for (var i = 0; i < files.length; i++) {
       var f = files[i];
-      var url = await requestDL(apiKey, torrentId, f.id);
-      resolvedFiles.push({ name: f.name, size: f.size || 0, req: { url: url } });
+      var u = await requestDL(apiKey, torrentId, f.id);
+      resolvedFiles.push({ name: f.name, size: f.size || 0, req: { url: u } });
     }
   }
 
@@ -61,10 +67,10 @@ async function createTorrent(apiKey, magnet) {
   return id;
 }
 
-async function waitUntilCached(apiKey, torrentId) {
-  var deadline = Date.now() + 6 * 60 * 60 * 1000; // 6 hours max
+async function waitUntilCached(apiKey, torrentId, timeoutMs) {
+  var deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    await sleep(5000);
+    await sleep(POLL_INTERVAL_MS);
     try {
       var resp = await fetch(
         API + '/torrents/mylist?id=' + torrentId + '&bypass_cache=true',
@@ -75,7 +81,7 @@ async function waitUntilCached(apiKey, torrentId) {
       if (!torrent) continue;
 
       var pct = Math.round((torrent.progress || 0) * 100);
-      gopeed.logger.debug('TorBox: caching ' + pct + '% state=' + (torrent.download_state || torrent.status || '?'));
+      gopeed.logger.debug('TorBox: ' + pct + '% state=' + (torrent.download_state || torrent.status || '?'));
 
       if (torrent.cached || torrent.download_state === 'cached' || (torrent.progress || 0) >= 1.0) {
         return torrent;
@@ -84,7 +90,9 @@ async function waitUntilCached(apiKey, torrentId) {
       gopeed.logger.warn('TorBox: poll error (retrying): ' + e.message);
     }
   }
-  throw new Error('TorBox: timed out (6 h) waiting for torrent to be cached');
+  throw new Error(
+    'TorBox is still caching this torrent. Paste the magnet again in ~1 minute to check if it\'s ready.'
+  );
 }
 
 async function requestDL(apiKey, torrentId, fileId) {
